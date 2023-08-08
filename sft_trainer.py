@@ -19,7 +19,7 @@ import torch
 from datasets import load_dataset
 from peft import LoraConfig
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig, HfArgumentParser, TrainingArguments
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig, HfArgumentParser, TrainingArguments, LlamaTokenizer
 
 from trl import SFTTrainer
 
@@ -34,7 +34,7 @@ class ScriptArguments:
     The name of the Casual LM model we wish to fine with SFTTrainer
     """
 
-    model_name: Optional[str] = field(default="facebook/opt-350m", metadata={"help": "the model name"})
+    model_name: Optional[str] = field(default="meta-llama/Llama-2-7b-hf", metadata={"help": "the model name"})
     dataset_name: Optional[str] = field(
         default="timdettmers/openassistant-guanaco", metadata={"help": "the dataset name"}
     )
@@ -59,8 +59,38 @@ class ScriptArguments:
     max_steps: Optional[int] = field(default=-1, metadata={"help": "the number of training steps"})
 
 
+def generate_and_tokenize_prompt(data_point):
+    full_prompt = f"Instruction: {data_point['instruction']} \nInput: {data_point['input']} \nResponse: {data_point['output']}"
+    tokenized_full_prompt = tokenize(full_prompt)
+    return tokenized_full_prompt
+
+
+def tokenize(prompt, add_eos_token=True):
+    # there's probably a way to do this with the tokenizer settings
+    # but again, gotta move fast
+    result = tokenizer(
+        prompt,
+        truncation=True,
+        max_length=4096,
+        padding=False,
+        return_tensors=None,
+    )
+    if (
+        result["input_ids"][-1] != tokenizer.eos_token_id
+        and len(result["input_ids"]) < 4096
+        and add_eos_token
+    ):
+        result["input_ids"].append(tokenizer.eos_token_id)
+        result["attention_mask"].append(1)
+
+    result["labels"] = result["input_ids"].copy()
+
+    return result
+
 parser = HfArgumentParser(ScriptArguments)
 script_args = parser.parse_args_into_dataclasses()[0]
+
+tokenizer = LlamaTokenizer.from_pretrained(script_args.model_name)
 
 # Step 1: Load the model
 if script_args.load_in_8bit and script_args.load_in_4bit:
@@ -92,6 +122,8 @@ if script_args.dataset_name.endswith(".json"):  # todo: support jsonl
     dataset = load_dataset("json", data_files=script_args.dataset_name)
 else:
     dataset = load_dataset(script_args.dataset_name, split="train")
+
+dataset.shuffle().map(generate_and_tokenize_prompt)
 
 # Step 3: Define the training arguments
 training_args = TrainingArguments(
